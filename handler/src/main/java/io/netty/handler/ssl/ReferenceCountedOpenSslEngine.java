@@ -128,6 +128,8 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
      */
     private static final int MAX_RECORD_SIZE = SSL_MAX_RECORD_LENGTH;
 
+    // https://tools.ietf.org/html/rfc5246#section-7.2
+    private static final int ALERT_SIZE = 2;
     private static final AtomicIntegerFieldUpdater<ReferenceCountedOpenSslEngine> DESTROYED_UPDATER =
             AtomicIntegerFieldUpdater.newUpdater(ReferenceCountedOpenSslEngine.class, "destroyed");
 
@@ -534,7 +536,9 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
      * via other synchronized blocks.
      */
     final int calculateMaxLengthForWrap(int plaintextLength, int numComponents) {
-        return (int) min(maxWrapBufferSize, plaintextLength + (long) maxWrapOverhead * numComponents);
+        // We assume as minimum 2 bytes for the plaintextLength so we can fit an alert into it.
+        return (int) min(maxWrapBufferSize,
+                Math.max(plaintextLength, ALERT_SIZE) + (long) maxWrapOverhead * numComponents);
     }
 
     final synchronized int sslPending() {
@@ -607,8 +611,14 @@ public class ReferenceCountedOpenSslEngine extends SSLEngine implements Referenc
 
                 int bioLengthBefore = SSL.bioLengthByteBuffer(networkBIO);
 
-                // Explicit use outboundClosed as we want to drain any bytes that are still present.
+                // Explicitly use outboundClosed as we want to drain any bytes that are still present.
                 if (outboundClosed) {
+                    // If the outbound was closed we want to ensure we can produce the alert to the destination buffer.
+                    // This is true even if we not using jdkCompatibilityMode.
+                    if (!isBytesAvailableEnoughForWrap(dst.remaining(), ALERT_SIZE, 1)) {
+                        return new SSLEngineResult(BUFFER_OVERFLOW, getHandshakeStatus(), 0, 0);
+                    }
+
                     // There is something left to drain.
                     // See https://github.com/netty/netty/issues/6260
                     bytesProduced = SSL.bioFlushByteBuffer(networkBIO);
